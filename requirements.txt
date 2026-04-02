@@ -1,0 +1,7 @@
+python-dotenv>=1.0.0
+kurigram
+pydub>=0.25.1
+num2words>=0.5.12
+pymystem3>=0.2.0
+pygame>=2.5.0
+TgCrypto-pyrofork
