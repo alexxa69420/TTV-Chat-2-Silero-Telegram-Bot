@@ -24,6 +24,9 @@
         "audio_volume": 0.7,
         "default_voice": "bandit",
         "flask_host": "127.0.0.1",
-        "flask_port": 8124
+        "flask_port": 8124,
+        "only_highlighted": false,
+        "ignore_english": true,
+        "max_message_length": 350
     }
 }
