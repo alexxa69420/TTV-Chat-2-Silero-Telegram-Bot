@@ -836,6 +836,7 @@ def setup_telegram_handlers(client):
                 return
 
             audio = AudioSegment.from_file(path)
+            audio = _normalize_audio_for_playback(audio)
             wav = str(path) + ".wav"
             audio.export(wav, format="wav")
             logger.info("🔓 Ответ Silero получен, воспроизведение…")
@@ -876,8 +877,27 @@ def _pygame_sample_size(sample_width_bytes):
     if sample_width_bytes == 2:
         return -16
     if sample_width_bytes == 4:
-        return -32
+        # На части систем SDL/pygame не поддерживает 32-bit signed mixer size.
+        return -16
     return -16
+
+
+def _normalize_audio_for_playback(audio):
+    """
+    Приводит декодированное аудио к параметрам, которые стабильно поддерживаются pygame.
+    """
+    normalized = audio
+    if int(getattr(normalized, "sample_width", 2)) not in (1, 2):
+        logger.warning(
+            "⚠️ Неподдерживаемая sample_width=%s, конвертирую в 16-bit PCM",
+            getattr(normalized, "sample_width", None),
+        )
+        normalized = normalized.set_sample_width(2)
+    ch = int(getattr(normalized, "channels", 2))
+    if ch not in (1, 2):
+        logger.warning("⚠️ channels=%s не поддерживается pygame mixer, конвертирую в stereo", ch)
+        normalized = normalized.set_channels(2)
+    return normalized
 
 
 def play_audio(path, sample_rate=44100, channels=2, sample_width=2):
@@ -934,16 +954,31 @@ def _play_audio_pyg(path, sample_rate, channels, sample_width):
             pygame.mixer.quit()
         except Exception:
             pass
-        size = _pygame_sample_size(sample_width)
+        requested_size = _pygame_sample_size(sample_width)
         ch = int(channels)
         if ch not in (1, 2):
             ch = 2
-        pygame.mixer.init(
-            frequency=int(sample_rate),
-            size=size,
-            channels=ch,
-            buffer=2048,
-        )
+        try:
+            pygame.mixer.init(
+                frequency=int(sample_rate),
+                size=requested_size,
+                channels=ch,
+                buffer=2048,
+            )
+        except ValueError as e:
+            # Дополнительный safety-net на случай экзотических драйверов.
+            logger.warning(
+                "⚠️ mixer.init не принял size=%s (%s), fallback на 16-bit",
+                requested_size,
+                e,
+            )
+            pygame.mixer.quit()
+            pygame.mixer.init(
+                frequency=int(sample_rate),
+                size=-16,
+                channels=ch,
+                buffer=2048,
+            )
         if pygame.mixer.get_init() is None:
             logger.error("❌ pygame.mixer не инициализирован (нет аудиоустройства?)")
         pygame.mixer.music.load(path)
