@@ -11,6 +11,7 @@ import ssl
 import time
 import random
 import json
+from collections import deque
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -60,15 +61,18 @@ _early_log = setup_early_logger()
 # =============================================================================
 def load_config():
     defaults = {
-        "voices":["bandit", "arthas", "anubarak", "rexxar","geralt",],
-        "blacklist_users": ["streamelements", "nightbot","alexxa69419","cassette_player69419","cassette_player69420"],
+        "voices":["bandit", "arthas", "rexxar","geralt",],
+        "blacklist_users":["streamelements", "nightbot", "jeetbot", "cassette_player69419", "cassette_player69420", "alexxa69419"],
         "blacklist_phrases": ["!command", "!discord", "https://"],
         "settings": {
             "target_bot": "silero_voice_bot",
-            "response_timeout": 45,
+            "response_timeout": 4,
             "audio_volume": 0.7,
             "flask_host": "127.0.0.1",
-            "flask_port": 8124
+            "flask_port": 8124,
+            "only_highlighted": False,
+            "ignore_english": True,
+            "max_message_length": 350
         }
     }
     
@@ -126,7 +130,7 @@ def load_config():
         _early_log.warning("🔄 Возвращаю дефолты...")
         return defaults.copy()
 
-# 🔹 Загружаем конфиг (теперь безопасно!)
+# 🔹 Загружаем конфиг
 CONFIG = load_config()
 
 # =============================================================================
@@ -179,6 +183,9 @@ twitch_connected = False
 
 synthesis_queue = asyncio.Queue()
 synthesis_semaphore = asyncio.Semaphore(1)
+
+# Хранилище ID последних удалённых сообщений (ограничиваем до 1000 чтобы не текла память)
+deleted_messages = deque(maxlen=1000)
 
 voice_bag =[]
 voice_bag_lock = threading.Lock()
@@ -241,7 +248,6 @@ def get_next_voice_prefix():
         return voice_bag.pop()
 
 def check_config_reload():
-    # ИСПРАВЛЕНО: Объявляем глобальными все переменные настроек, чтобы изменения применялись
     global CONFIG, VOICE_PREFIXES, BLACKLIST_USERS, BLACKLIST_PHRASES, SETTINGS, _config_mtime
     global TARGET_BOT_USERNAME, RESPONSE_TIMEOUT, AUDIO_VOLUME, FLASK_HOST, FLASK_PORT
     
@@ -257,14 +263,12 @@ def check_config_reload():
             BLACKLIST_PHRASES = CONFIG.get("blacklist_phrases",[])
             SETTINGS = CONFIG.get("settings", {})
             
-            # ИСПРАВЛЕНО: Обновляем переменные, используемые в коде
             TARGET_BOT_USERNAME = SETTINGS.get("target_bot", "silero_voice_bot")
             RESPONSE_TIMEOUT = int(SETTINGS.get("response_timeout", 45))
             AUDIO_VOLUME = float(SETTINGS.get("audio_volume", 1.0))
             FLASK_HOST = SETTINGS.get("flask_host", "127.0.0.1")
             FLASK_PORT = int(SETTINGS.get("flask_port", 8124))
             
-            # Обновляем таймер, чтобы предотвратить бесконечный цикл перезагрузок
             _config_mtime = CONFIG_FILE.stat().st_mtime
             logger.info("✅ Конфиг успешно обновлён в оперативной памяти")
         except Exception as e:
@@ -275,6 +279,12 @@ def check_config_reload():
 # =============================================================================
 def filter_message(username, message):
     msg = message.strip()
+    
+    # 4) Игнорирование сообщений длиннее заданного значения
+    max_len = SETTINGS.get("max_message_length", 250)
+    if len(msg) > max_len:
+        return False
+        
     if msg.startswith(('/', '!')):
         return False
     if username.lower() in BLACKLIST_USERS:
@@ -324,10 +334,29 @@ def correct_gender_mystem(text):
     return ' '.join(result)
 
 def process_chat_message(username, raw):
+    # 3) Вырезаем упоминания (в Twitch ники состоят из латинских букв, цифр и _)
+    raw = re.sub(r'@[a-zA-Z0-9_]+', '', raw)
+    
+    # 2) Игнорирование английского языка + умный фикс эмоутов с цифрами
+    if SETTINGS.get("ignore_english", True):
+        # ШАГ 1: Если слово НАЧИНАЕТСЯ с английской буквы, удаляем его ЦЕЛИКОМ.
+        # Это полностью сотрет эмоуты типа 'alexxa28Gun', 'KEKW' до пробела/знака препинания.
+        raw = re.sub(r'\b[a-zA-Z][a-zA-Z0-9_]*', '', raw)
+        
+        # ШАГ 2: Удаляем оставшиеся английские буквы (например, от '7TV' останется '7')
+        raw = re.sub(r'[a-zA-Z]', '', raw)
+        
     if not filter_message(username, raw):
         return None
+        
     text = replace_numbers_smart(raw.strip())
     text = correct_gender_mystem(text)
+    
+    # 🛡️ ЗАЩИТА ОТ ТАЙМАУТОВ: 
+    # Если в тексте нет ни одной буквы или цифры (одни скобки/точки/пустота) — игнорируем!
+    if not re.search(r'[а-яА-ЯёЁ0-9a-zA-Z]', text):
+        return None
+        
     prefix = get_next_voice_prefix()
     final = f"{prefix} {text}"
     logger.info(f"🎤[{username}] → '{final}'")
@@ -346,8 +375,17 @@ async def connect_twitch():
         ssl_ctx = ssl.create_default_context()
         twitch_reader, twitch_writer = await asyncio.open_connection(
             'irc.chat.twitch.tv', 6697, ssl=ssl_ctx)
-        auth = f"PASS {TWITCH_TOKEN}\r\nNICK {TWITCH_USERNAME}\r\nJOIN #{TWITCH_CHANNEL}\r\n"
+            
+        auth = f"PASS {TWITCH_TOKEN}\r\nNICK {TWITCH_USERNAME}\r\n"
         twitch_writer.write(auth.encode())
+        
+        # 5) Запрашиваем Twitch CAPabilities для получения тегов и отслеживания удаления сообщений (CLEARMSG)
+        req = "CAP REQ :twitch.tv/tags twitch.tv/commands\r\n"
+        twitch_writer.write(req.encode())
+        
+        join = f"JOIN #{TWITCH_CHANNEL}\r\n"
+        twitch_writer.write(join.encode())
+        
         await twitch_writer.drain()
         twitch_connected = True
         logger.info("✅ Вход в Twitch")
@@ -372,8 +410,7 @@ async def twitch_listener():
                     twitch_writer.write("PONG :tmi.twitch.tv\r\n".encode())
                     await twitch_writer.drain()
                     continue
-                if "PRIVMSG" in msg and f"#{TWITCH_CHANNEL}" in msg:
-                    await parse_twitch_message(msg)
+                await parse_twitch_message(msg)
         except Exception as e:
             logger.error(f"❌ twitch_listener: {e}")
             await asyncio.sleep(5)
@@ -382,18 +419,57 @@ async def twitch_listener():
 
 async def parse_twitch_message(raw):
     try:
-        if ':' not in raw:
+        tags_dict = {}
+        msg_str = raw
+        
+        # Парсим IRC-теги
+        if msg_str.startswith('@'):
+            parts = msg_str.split(' ', 1)
+            if len(parts) > 1:
+                tags_part = parts[0][1:]
+                msg_str = parts[1]
+                for tag in tags_part.split(';'):
+                    if '=' in tag:
+                        k, v = tag.split('=', 1)
+                        tags_dict[k] = v
+
+        # 5) Проверяем, не является ли пакет уведомлением об удалении сообщения в чате
+        if " CLEARMSG " in msg_str:
+            target_id = tags_dict.get('target-msg-id')
+            if target_id:
+                deleted_messages.append(target_id)
+                logger.info(f"🗑️ Сообщение удалено в чате (ID: {target_id[:8]}...)")
             return
-        parts = raw.split(':', 2)
+
+        # Игнорируем всё, что не является текстовым сообщением
+        if " PRIVMSG " not in msg_str:
+            return
+            
+        parts = msg_str.split(':', 2)
         if len(parts) < 3:
             return
+            
         user = parts[1].split('!')[0].lower()
         msg = parts[2].strip()
+        
         if user == TWITCH_USERNAME.lower():
             return
+            
+        # 1) Озвучиваем только Highlight my message или награды за баллы
+        if SETTINGS.get("only_highlighted", False):
+            # Проверка тегов на наличие стандартного highlight или кастомной награды
+            is_highlighted = (tags_dict.get('msg-id') == 'highlighted-message' or 'custom-reward-id' in tags_dict)
+            if not is_highlighted:
+                return
+
+        # Получаем уникальный ID сообщения
+        msg_id = tags_dict.get('id', '')
+        
         processed = process_chat_message(user, msg)
         if processed:
-            await synthesis_queue.put(processed)
+            # Кладем в очередь как кортеж: (ID сообщения, Обработанный текст)
+            await synthesis_queue.put((msg_id, processed))
+            
     except Exception as e:
         logger.error(f"❌ parse_twitch: {e}")
 
@@ -466,8 +542,29 @@ async def synthesis_worker():
     logger.info("🔄 Worker запущен")
     while True:
         try:
-            text = await synthesis_queue.get()
+            queue_item = await synthesis_queue.get()
+            
+            # Извлекаем данные
+            if isinstance(queue_item, tuple):
+                msg_id, text = queue_item
+            else:
+                msg_id, text = "", queue_item
+                
+            # 5) Проверяем (до захвата семафора), не было ли сообщение уже удалено
+            if msg_id and msg_id in deleted_messages:
+                logger.info(f"⏭️ Пропуск удалённого сообщения: '{text[:40]}...'")
+                synthesis_queue.task_done()
+                continue
+                
             await synthesis_semaphore.acquire()
+            
+            # 5) Повторная проверка (сообщение могло быть удалено, пока бот ждал озвучки предыдущего)
+            if msg_id and msg_id in deleted_messages:
+                logger.info(f"⏭️ Пропуск (успели удалить): '{text[:40]}...'")
+                synthesis_semaphore.release()
+                synthesis_queue.task_done()
+                continue
+                
             logger.info(f"⚙️ Синтез: {text[:60]}...")
             
             sent = await send_to_tts_bot(text)
