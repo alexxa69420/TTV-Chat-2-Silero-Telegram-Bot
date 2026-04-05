@@ -27,7 +27,7 @@
 ### Шаг 2: Скачайте файлы
 
 1. Создайте новую папку на компьютере, например `TTV-Chat-2-Silero-Telegram-Bot`
-2. Распакуйте в папку скачанный архив по следующей [ссылке](https://github.com/alexxa69420/TTV-Chat-2-Silero-Telegram-Bot/releases/download/%D1%82%D1%8D%D0%B32/TTV-Chat-2-Silero-Telegram-Bot.7z)
+2. Распакуйте в папку скачанный архив по следующей [ссылке](https://github.com/alexxa69420/TTV-Chat-2-Silero-Telegram-Bot/releases/download/%D1%82%D1%8D%D0%B33/TTV-Chat-2-Silero-Telegram-Bot.7z)
 
 ### Шаг 3: Установите зависимости
 
