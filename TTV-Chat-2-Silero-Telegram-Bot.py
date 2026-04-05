@@ -94,7 +94,7 @@ def load_config():
             config["voices"] = defaults["voices"]
             needs_save = True
         
-        # Merge с дефолтами (теперь мы реально сохраняем их в файл, если они отсутствовали)
+        # Merge с дефолтами
         for key in defaults:
             if key not in config:
                 config[key] = defaults[key]
@@ -106,7 +106,6 @@ def load_config():
                     config["settings"][k] = v
                     needs_save = True
         
-        # Если добавили новые ключи из дефолтов - сохраняем файл
         if needs_save:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)
@@ -151,7 +150,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 load_dotenv(ENV_FILE)
 
-# Секреты — только из .env
+# Секреты
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 SESSION_NAME = str(BASE_DIR / "tts_session")
@@ -159,7 +158,7 @@ TWITCH_USERNAME = os.getenv("TWITCH_USERNAME")
 TWITCH_TOKEN = os.getenv("TWITCH_TOKEN")
 TWITCH_CHANNEL = os.getenv("TWITCH_CHANNEL")
 
-# Настройки — только из config.json
+# Настройки
 SETTINGS = CONFIG.get("settings", {})
 TARGET_BOT_USERNAME = SETTINGS.get("target_bot", "silero_voice_bot")
 RESPONSE_TIMEOUT = int(SETTINGS.get("response_timeout", 45))
@@ -167,7 +166,7 @@ AUDIO_VOLUME = float(SETTINGS.get("audio_volume", 1.0))
 FLASK_HOST = SETTINGS.get("flask_host", "127.0.0.1")
 FLASK_PORT = int(SETTINGS.get("flask_port", 8124))
 
-# Голоса и блеклисты — только из config.json
+# Голоса и блеклисты
 VOICE_PREFIXES = CONFIG["voices"]
 BLACKLIST_USERS = set(u.lower() for u in CONFIG.get("blacklist_users",[]))
 BLACKLIST_PHRASES = CONFIG.get("blacklist_phrases",[])
@@ -184,7 +183,11 @@ twitch_connected = False
 synthesis_queue = asyncio.Queue()
 synthesis_semaphore = asyncio.Semaphore(1)
 
-# Хранилище ID последних удалённых сообщений (ограничиваем до 1000 чтобы не текла память)
+# Два события: одно для ожидания ответа бота, другое для завершения воспроизведения
+bot_response_event = asyncio.Event()
+playback_done_event = asyncio.Event()
+
+# Хранилище ID последних удалённых сообщений
 deleted_messages = deque(maxlen=1000)
 
 voice_bag =[]
@@ -216,7 +219,6 @@ def init_config():
             ch = input("Channel: ").strip().lower()
             TWITCH_CHANNEL = ch.split("twitch.tv/")[-1].split("/")[0] if "twitch.tv/" in ch else ch
         
-        # Гарантированно пишем рядом со скриптом
         with open(ENV_FILE, "w", encoding="utf-8") as f:
             f.write(f"API_ID={API_ID}\nAPI_HASH={API_HASH}\n")
             f.write(f"TWITCH_USERNAME={TWITCH_USERNAME}\nTWITCH_TOKEN={TWITCH_TOKEN}\nTWITCH_CHANNEL={TWITCH_CHANNEL}\n")
@@ -242,7 +244,7 @@ def get_next_voice_prefix():
     global voice_bag, voice_bag_lock
     with voice_bag_lock:
         if not voice_bag:
-            voice_bag = [parse_voice_prefix(p)[0] for p in VOICE_PREFIXES]
+            voice_bag =[parse_voice_prefix(p)[0] for p in VOICE_PREFIXES]
             random.shuffle(voice_bag)
             logger.info(f"🔀 Мешок: {voice_bag}")
         return voice_bag.pop()
@@ -280,7 +282,6 @@ def check_config_reload():
 def filter_message(username, message):
     msg = message.strip()
     
-    # 4) Игнорирование сообщений длиннее заданного значения
     max_len = SETTINGS.get("max_message_length", 250)
     if len(msg) > max_len:
         return False
@@ -314,7 +315,7 @@ def correct_gender_mystem(text):
     words = text.split()
     result =[]
     for i, word in enumerate(words):
-        if word in ['один', 'два'] and i+1 < len(words):
+        if word in['один', 'два'] and i+1 < len(words):
             nxt = re.sub(r'[^\w\s]+$', '', words[i+1]).strip()
             if nxt:
                 try:
@@ -334,16 +335,9 @@ def correct_gender_mystem(text):
     return ' '.join(result)
 
 def process_chat_message(username, raw):
-    # 3) Вырезаем упоминания (в Twitch ники состоят из латинских букв, цифр и _)
     raw = re.sub(r'@[a-zA-Z0-9_]+', '', raw)
-    
-    # 2) Игнорирование английского языка + умный фикс эмоутов с цифрами
     if SETTINGS.get("ignore_english", True):
-        # ШАГ 1: Если слово НАЧИНАЕТСЯ с английской буквы, удаляем его ЦЕЛИКОМ.
-        # Это полностью сотрет эмоуты типа 'alexxa28Gun', 'KEKW' до пробела/знака препинания.
         raw = re.sub(r'\b[a-zA-Z][a-zA-Z0-9_]*', '', raw)
-        
-        # ШАГ 2: Удаляем оставшиеся английские буквы (например, от '7TV' останется '7')
         raw = re.sub(r'[a-zA-Z]', '', raw)
         
     if not filter_message(username, raw):
@@ -352,8 +346,6 @@ def process_chat_message(username, raw):
     text = replace_numbers_smart(raw.strip())
     text = correct_gender_mystem(text)
     
-    # 🛡️ ЗАЩИТА ОТ ТАЙМАУТОВ: 
-    # Если в тексте нет ни одной буквы или цифры (одни скобки/точки/пустота) — игнорируем!
     if not re.search(r'[а-яА-ЯёЁ0-9a-zA-Z]', text):
         return None
         
@@ -379,7 +371,6 @@ async def connect_twitch():
         auth = f"PASS {TWITCH_TOKEN}\r\nNICK {TWITCH_USERNAME}\r\n"
         twitch_writer.write(auth.encode())
         
-        # 5) Запрашиваем Twitch CAPabilities для получения тегов и отслеживания удаления сообщений (CLEARMSG)
         req = "CAP REQ :twitch.tv/tags twitch.tv/commands\r\n"
         twitch_writer.write(req.encode())
         
@@ -422,7 +413,6 @@ async def parse_twitch_message(raw):
         tags_dict = {}
         msg_str = raw
         
-        # Парсим IRC-теги
         if msg_str.startswith('@'):
             parts = msg_str.split(' ', 1)
             if len(parts) > 1:
@@ -433,7 +423,6 @@ async def parse_twitch_message(raw):
                         k, v = tag.split('=', 1)
                         tags_dict[k] = v
 
-        # 5) Проверяем, не является ли пакет уведомлением об удалении сообщения в чате
         if " CLEARMSG " in msg_str:
             target_id = tags_dict.get('target-msg-id')
             if target_id:
@@ -441,7 +430,6 @@ async def parse_twitch_message(raw):
                 logger.info(f"🗑️ Сообщение удалено в чате (ID: {target_id[:8]}...)")
             return
 
-        # Игнорируем всё, что не является текстовым сообщением
         if " PRIVMSG " not in msg_str:
             return
             
@@ -455,19 +443,15 @@ async def parse_twitch_message(raw):
         if user == TWITCH_USERNAME.lower():
             return
             
-        # 1) Озвучиваем только Highlight my message или награды за баллы
         if SETTINGS.get("only_highlighted", False):
-            # Проверка тегов на наличие стандартного highlight или кастомной награды
             is_highlighted = (tags_dict.get('msg-id') == 'highlighted-message' or 'custom-reward-id' in tags_dict)
             if not is_highlighted:
                 return
 
-        # Получаем уникальный ID сообщения
         msg_id = tags_dict.get('id', '')
         
         processed = process_chat_message(user, msg)
         if processed:
-            # Кладем в очередь как кортеж: (ID сообщения, Обработанный текст)
             await synthesis_queue.put((msg_id, processed))
             
     except Exception as e:
@@ -496,28 +480,39 @@ def setup_telegram_handlers(client):
     @client.on_message(filters.private & filters.user(TARGET_BOT_USERNAME) & filters.voice)
     async def handle_voice(client, message):
         logger.info("🎧 Голос от бота")
+        bot_response_event.set() # Сигнализируем, что бот ответил
         try:
             with tempfile.NamedTemporaryFile(suffix='.ogg', delete=False) as tmp:
                 path = await message.download(file_name=tmp.name)
-                audio = AudioSegment.from_ogg(path)
-                wav = path.replace('.ogg', '.wav')
-                audio.export(wav, format='wav')
-                play_audio(wav)
+            
+            # Выполняем синхронную обработку и блокирующее аудио в фоновом пуле потоков
+            def process_and_play():
                 try:
-                    os.unlink(path)
-                    os.unlink(wav)
-                except:
-                    pass
+                    audio = AudioSegment.from_ogg(path)
+                    wav = path.replace('.ogg', '.wav')
+                    audio.export(wav, format='wav')
+                    play_audio(wav)
+                    try:
+                        os.unlink(path)
+                        os.unlink(wav)
+                    except:
+                        pass
+                except Exception as e:
+                    logger.error(f"❌ Ошибка аудио (конвертация/воспроизведение): {e}")
+
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, process_and_play)
         except Exception as e:
-            logger.error(f"❌ Аудио: {e}")
+            logger.error(f"❌ Ошибка загрузки файла: {e}")
         finally:
-            synthesis_semaphore.release()
-            logger.info("🔓 Освобождено (голос)")
+            playback_done_event.set() # Сигнализируем, что воспроизведение завершилось
+            logger.info("🔓 Освобождено (голос проигран)")
 
     @client.on_message(filters.private & filters.user(TARGET_BOT_USERNAME) & filters.text)
     async def handle_text_refusal(client, message):
         logger.info(f"📝 Текст от бота (отказ): '{message.text[:50]}...'")
-        synthesis_semaphore.release()
+        bot_response_event.set()
+        playback_done_event.set() # Отказ, поэтому просто снимаем блок
         logger.info("🔓 Освобождено (текст)")
 
 def play_audio(path):
@@ -543,59 +538,52 @@ async def synthesis_worker():
     while True:
         try:
             queue_item = await synthesis_queue.get()
-            
-            # Извлекаем данные
-            if isinstance(queue_item, tuple):
-                msg_id, text = queue_item
-            else:
-                msg_id, text = "", queue_item
-                
-            # 5) Проверяем (до захвата семафора), не было ли сообщение уже удалено
-            if msg_id and msg_id in deleted_messages:
-                logger.info(f"⏭️ Пропуск удалённого сообщения: '{text[:40]}...'")
-                synthesis_queue.task_done()
-                continue
-                
-            await synthesis_semaphore.acquire()
-            
-            # 5) Повторная проверка (сообщение могло быть удалено, пока бот ждал озвучки предыдущего)
-            if msg_id and msg_id in deleted_messages:
-                logger.info(f"⏭️ Пропуск (успели удалить): '{text[:40]}...'")
-                synthesis_semaphore.release()
-                synthesis_queue.task_done()
-                continue
-                
-            logger.info(f"⚙️ Синтез: {text[:60]}...")
-            
-            sent = await send_to_tts_bot(text)
-            if not sent:
-                logger.error("❌ Не отправлено")
-                synthesis_semaphore.release()
-                synthesis_queue.task_done()
-                continue
-            
-            # Таймаут-страховка
-            async def timeout_rel():
-                await asyncio.sleep(RESPONSE_TIMEOUT + 10)
-                if synthesis_semaphore.locked():
-                    logger.warning("⏰ Таймаут синтеза")
-                    synthesis_semaphore.release()
-            
-            t = asyncio.create_task(timeout_rel())
-            while synthesis_semaphore.locked():
-                await asyncio.sleep(0.5)
-            t.cancel()
             try:
-                await t
-            except asyncio.CancelledError:
-                pass
-            
-            synthesis_queue.task_done()
-            
+                if isinstance(queue_item, tuple):
+                    msg_id, text = queue_item
+                else:
+                    msg_id, text = "", queue_item
+                    
+                # Проверяем до захвата семафора
+                if msg_id and msg_id in deleted_messages:
+                    logger.info(f"⏭️ Пропуск удалённого сообщения: '{text[:40]}...'")
+                    continue
+                    
+                await synthesis_semaphore.acquire()
+                try:
+                    # Повторная проверка
+                    if msg_id and msg_id in deleted_messages:
+                        logger.info(f"⏭️ Пропуск (успели удалить): '{text[:40]}...'")
+                        continue
+                        
+                    logger.info(f"⚙️ Синтез: {text[:60]}...")
+                    
+                    bot_response_event.clear()
+                    playback_done_event.clear()
+                    
+                    sent = await send_to_tts_bot(text)
+                    if not sent:
+                        logger.error("❌ Не отправлено")
+                        continue
+                    
+                    # 1. Ждем ТОЛЬКО получения ответа от бота (учитываем таймаут генерации)
+                    try:
+                        await asyncio.wait_for(bot_response_event.wait(), timeout=RESPONSE_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        logger.warning("⏰ Таймаут ответа от бота (нет ответа)")
+                        continue
+                    
+                    # 2. Ждем окончания самого воспроизведения (никаких таймаутов, ждем полного завершения звука)
+                    await playback_done_event.wait()
+                    
+                finally:
+                    # Гарантированно отпускаем семафор только тут (воркер сам управляет очередью)
+                    synthesis_semaphore.release()
+            finally:
+                synthesis_queue.task_done()
+                
         except Exception as e:
             logger.error(f"❌ Worker error: {e}", exc_info=True)
-            if synthesis_semaphore.locked():
-                synthesis_semaphore.release()
             await asyncio.sleep(2)
 
 # =============================================================================
