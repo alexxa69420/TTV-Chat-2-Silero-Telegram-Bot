@@ -68,7 +68,7 @@ _early_log = setup_early_logger()
 def load_config():
     defaults = {
         "voices":["bandit", "arthas", "rexxar","geralt",],
-        "blacklist_users":["streamelements", "nightbot", "jeetbot", "cassette_player69419", "cassette_player69420", "alexxa69419"],
+        "blacklist_users":["streamelements", "nightbot", "jeetbot", "cassette_player69420"],
         "blacklist_phrases": ["!command", "!discord", "https://"],
         "settings": {
             "target_bot": "silero_voice_bot",
