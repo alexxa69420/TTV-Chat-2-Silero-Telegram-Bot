@@ -201,6 +201,9 @@ HAS_FFMPEG = has_ffmpeg_tools()
 VOICE_PREFIXES = CONFIG["voices"]
 BLACKLIST_USERS = set(u.lower() for u in CONFIG.get("blacklist_users",[]))
 BLACKLIST_PHRASES = CONFIG.get("blacklist_phrases",[])
+RESERVED_VOICE_OWNERS = {
+    "dream": "alexxa69419",
+}
 
 # =============================================================================
 # 🌐 ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
@@ -397,6 +400,17 @@ def get_allowed_voice_prefixes():
     return voices
 
 
+def get_allowed_voice_prefixes_for_user(username):
+    user = normalize_username(username)
+    allowed = []
+    for voice in get_allowed_voice_prefixes():
+        owner = RESERVED_VOICE_OWNERS.get(voice)
+        if owner and user != owner:
+            continue
+        allowed.append(voice)
+    return allowed
+
+
 def get_default_voice():
     global _last_invalid_default_voice
     allowed = get_allowed_voice_prefixes()
@@ -418,16 +432,25 @@ def get_default_voice():
 def get_voice_for_user(username):
     user = normalize_username(username)
     allowed = set(get_allowed_voice_prefixes())
+    allowed_for_user = set(get_allowed_voice_prefixes_for_user(user))
     default_voice = get_default_voice()
     if not allowed:
+        return default_voice, "default"
+    if not allowed_for_user:
         return default_voice, "default"
     if not user_voice_repo:
         return default_voice, "default"
     stored_voice = user_voice_repo.get_voice(user)
     if not stored_voice:
         return default_voice, "default"
-    if stored_voice in allowed:
+    if stored_voice in allowed_for_user:
         return stored_voice, "db"
+    owner = RESERVED_VOICE_OWNERS.get(stored_voice)
+    if owner and owner != user:
+        logger.warning(
+            f"⚠️ У пользователя '{user}' зарезервированный голос '{stored_voice}' (владелец: '{owner}'). Использую default."
+        )
+        return default_voice, "default"
     logger.warning(
         f"⚠️ У пользователя '{user}' невалидный голос '{stored_voice}' в БД. Использую default."
     )
@@ -462,7 +485,7 @@ def handle_voice_command(username, message):
     user = normalize_username(username)
     if user in BLACKLIST_USERS:
         return True, None
-    allowed = get_allowed_voice_prefixes()
+    allowed = get_allowed_voice_prefixes_for_user(user)
     allowed_set = set(allowed)
     default_voice = get_default_voice()
 
@@ -482,6 +505,9 @@ def handle_voice_command(username, message):
         if not value:
             return True, f"@{user} usage: !voice set <voice>. try !voice list"
         if value not in allowed_set:
+            owner = RESERVED_VOICE_OWNERS.get(value)
+            if owner and owner != user:
+                return True, f"@{user} voice '{value}' is reserved"
             return True, f"@{user} unknown voice '{value}'. try !voice list"
         if not user_voice_repo:
             return True, f"@{user} preferences storage unavailable, using default '{default_voice}'"
