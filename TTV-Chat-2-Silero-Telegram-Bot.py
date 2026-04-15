@@ -203,6 +203,7 @@ BLACKLIST_USERS = set(u.lower() for u in CONFIG.get("blacklist_users",[]))
 BLACKLIST_PHRASES = CONFIG.get("blacklist_phrases",[])
 RESERVED_VOICE_OWNERS = {
     "dream": "alexxa69419",
+    "catgirl": "nickessen_kuru",
 }
 
 # =============================================================================
